@@ -692,20 +692,26 @@ func (m model) viewTarget() string {
 	return b.String()
 }
 
-// applySizes pushes the current window size into the prompt editor and the
-// filter inputs so they wrap and scroll to fit.
+// applySizes pushes the current window size into the inputs of the active stage
+// so they wrap and scroll to fit. Only the live stage's components are touched:
+// the form's textinput/textarea and the target picker are zero-value until their
+// stage is entered (built in beginAdd/beginEdit/beginDrop), and calling a method
+// like textarea.SetWidth on a zero-value model dereferences nil internal state.
 func (m *model) applySizes() {
 	w := m.width - 4
 	if w < 20 {
 		return
 	}
 	m.list.input.Width = w
-	m.targetList.input.Width = w
-	m.titleInput.Width = w
-	m.promptArea.SetWidth(w)
-	h := m.height - 12
-	if h >= 4 {
-		m.promptArea.SetHeight(h)
+	switch m.stage {
+	case stageForm:
+		m.titleInput.Width = w
+		m.promptArea.SetWidth(w)
+		if h := m.height - 12; h >= 4 {
+			m.promptArea.SetHeight(h)
+		}
+	case stageTarget:
+		m.targetList.input.Width = w
 	}
 }
 
