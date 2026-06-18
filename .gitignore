@@ -1,3 +1,10 @@
+.claude/
+.idea/
+.zed
+.vscode/
+.DS_Store
+.qodo
+opencode.json
+
 /bin/
 *.test
-.DS_Store

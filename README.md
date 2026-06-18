@@ -25,11 +25,17 @@ socket API to create panes and type into them.
   - **A new session** — opens a new tab in the current project's workspace and
     launches `claude`.
 - **You choose submit behavior per drop.**
-  - `enter` — *paste, don't run*: types the prompt into Claude Code's input but
+  - `enter` — _paste, don't run_: types the prompt into Claude Code's input but
     doesn't submit, so you can review/edit and press Enter yourself.
-  - `ctrl+r` — *drop & run*: submits it so Claude starts working immediately.
+  - `ctrl+r` — _drop & run_: submits it so Claude starts working immediately.
 
 ## Install
+
+### From GitHub
+
+```sh
+herdr plugin install rohanthewiz/herdr-todo
+```
 
 ### Local development (this checkout)
 
@@ -44,12 +50,6 @@ the `Herdr Todo: Prompts` action. After code changes:
 make relink     # rebuild + unlink + link
 ```
 
-### From GitHub
-
-```sh
-herdr plugin install rohanthewiz/herdr-todo
-```
-
 Requires Go 1.26+ to build from source.
 
 ## Use
@@ -57,11 +57,11 @@ Requires Go 1.26+ to build from source.
 Bind a key to the **`Herdr Todo: Prompts`** action, or run it from herdr's action
 menu. Inside the manager:
 
-| Stage   | Keys |
-|---------|------|
-| List    | `enter` drop · `ctrl+a` add · `ctrl+e` edit · `ctrl+t` toggle done · `ctrl+x` delete · type to filter · `esc` clear filter / quit |
-| Form    | `tab` switch field · `ctrl+s` save · `ctrl+g` toggle Project/Global (when adding) · `esc` cancel |
-| Target  | `enter` paste (don't submit) · `ctrl+r` drop & run · `esc` back |
+| Stage  | Keys                                                                                                                              |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| List   | `enter` drop · `ctrl+a` add · `ctrl+e` edit · `ctrl+t` toggle done · `ctrl+x` delete · type to filter · `esc` clear filter / quit |
+| Form   | `tab` switch field · `ctrl+s` save · `ctrl+g` toggle Project/Global (when adding) · `esc` cancel                                  |
+| Target | `enter` paste (don't submit) · `ctrl+r` drop & run · `esc` back                                                                   |
 
 ## How the "drop" works
 
@@ -69,9 +69,9 @@ menu. Inside the manager:
   `pane.send_input` (a real Enter key in run mode; no key in paste mode).
 - **New session:** a tab is created in the project workspace
   (`tab.create`), then:
-  - *run mode* launches `claude <prompt>` — Claude Code takes a leading prompt
+  - _run mode_ launches `claude <prompt>` — Claude Code takes a leading prompt
     argument and starts working on it immediately;
-  - *paste mode* launches bare `claude`, waits for its input UI to draw, then
+  - _paste mode_ launches bare `claude`, waits for its input UI to draw, then
     types the prompt without submitting.
 
 ## Layout
