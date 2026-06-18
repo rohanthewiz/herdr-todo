@@ -1,0 +1,36 @@
+# herdr-plugin.toml registers herdr-todo with herdr as a first-class plugin.
+#
+# Local development:  herdr plugin link .   (from a checkout)
+# GitHub install:     herdr plugin install rohanthewiz/herdr-todo
+#
+# herdr-todo is a "prompt backlog": you jot down prompts for future work and,
+# when you're ready, fuzzy-pick one and drop it straight into a Claude Code
+# session — either an already-running one herdr has detected, or a fresh one it
+# spins up for you in the current project.
+
+id = "rohanthewiz.herdr-todo"
+name = "Herdr Todo"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "A prompt backlog for herdr. Jot down prompts of future work (per-project and global), then fuzzy-pick one and drop it into a Claude Code session — an existing agent pane or a brand-new one — paste-only or run-now."
+platforms = ["linux", "macos"]
+
+# Build the binary at install/link time. herdr runs this once in the plugin root.
+[[build]]
+command = ["sh", "scripts/build.sh"]
+
+# todo — the action you bind a key to (or run from herdr's action menu). It runs
+# server-side, captures the focused pane's context, and opens the manager UI as a
+# zoomed plugin pane (the `todo-ui` entrypoint below).
+[[actions]]
+id = "todo"
+title = "Herdr Todo: Prompts"
+command = ["./bin/herdr-todo", "todo"]
+
+# todo-ui — the manager UI itself, run by herdr inside the pane the `todo` action
+# opens. End users never invoke this directly.
+[[panes]]
+id = "todo-ui"
+title = "Herdr Todo"
+placement = "zoomed"
+command = ["./bin/herdr-todo", "todo-ui"]

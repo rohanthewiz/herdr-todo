@@ -1,0 +1,8 @@
+herdr-todo
+Copyright (c) 2026 Rohan Allison
+
+This product includes code adapted from herdr-plus
+(https://github.com/cloudmanic/herdr-plus), Copyright (c) 2026 Cloudmanic
+Labs, LLC, used under the MIT License. Specifically, the herdr unix-socket
+JSON-RPC client, the run-context plumbing, and the fuzzy-list TUI component
+are derived from herdr-plus and adapted here.
