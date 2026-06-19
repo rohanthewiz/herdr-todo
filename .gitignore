@@ -7,4 +7,5 @@
 opencode.json
 
 /bin/
+/herdr-todo
 *.test
