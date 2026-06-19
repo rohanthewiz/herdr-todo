@@ -59,6 +59,16 @@ func runTodoUI() {
 		errExit("could not decode launch context:", err)
 	}
 
+	// When launched directly (e.g. as a herdr-plus project tab command) rather
+	// than through the `todo` action, HERDR_TODO_CTX is absent and ctx is empty.
+	// Fall back to the pane's working directory so project todos still scope to
+	// the directory the pane opened in.
+	if ctx.WorkDir == "" {
+		if wd, e := os.Getwd(); e == nil {
+			ctx.WorkDir = wd
+		}
+	}
+
 	project, global, err := loadStores(ctx)
 	if err != nil {
 		// Leave the pane open so the user can read the error.
