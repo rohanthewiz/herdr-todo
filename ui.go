@@ -64,12 +64,21 @@ type todoRef struct {
 	id    string
 }
 
-// pendingAction is the drop the user chose; it is performed after the TUI exits
-// (so creating panes / switching workspaces happens once our pane tears down).
+// pendingAction is the drop the user chose. The manager performs it without
+// quitting — off the UI thread (see performDropCmd) — so the pane persists and
+// you can drop more prompts in the same session.
 type pendingAction struct {
 	todo   Todo
 	target dropTarget
 	mode   dropMode
+}
+
+// dropResultMsg reports the outcome of an asynchronous drop back to the Update
+// loop, so the manager can clear its "dropping…" state and show where the prompt
+// landed (or why it failed) while staying open.
+type dropResultMsg struct {
+	desc string // human description of the destination, for the status line
+	err  error
 }
 
 // model is the Bubble Tea state for the whole manager: a small stage machine
@@ -109,7 +118,7 @@ type model struct {
 	status    string // transient message under the list
 	statusErr bool
 
-	action   *pendingAction // result, read after Run() exits
+	dropping bool // a drop is in flight (off the UI thread); guards re-entry
 	quitting bool
 }
 
@@ -131,6 +140,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.applySizes()
+		return m, nil
+	case dropResultMsg:
+		m.dropping = false
+		if msg.err != nil {
+			m.setStatus("drop failed: "+msg.err.Error(), true)
+		} else {
+			m.setStatus("dropped → "+msg.desc, false)
+		}
 		return m, nil
 	case tea.KeyMsg:
 		switch m.stage {
@@ -481,6 +498,10 @@ func (m model) beginDrop() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if m.dropping {
+		m.setStatus("a drop is still in progress…", false)
+		return m, nil
+	}
 	if m.client == nil {
 		m.setStatus("herdr socket unavailable — can't drop into a session", true)
 		return m, nil
@@ -574,6 +595,9 @@ func (m model) updateTarget(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) chooseTarget(mode dropMode) (tea.Model, tea.Cmd) {
+	if m.dropping {
+		return m, nil
+	}
 	idx := m.targetList.selectedIndex()
 	if idx < 0 || idx >= len(m.targets) {
 		return m, nil
@@ -584,9 +608,38 @@ func (m model) chooseTarget(mode dropMode) (tea.Model, tea.Cmd) {
 		m.stage = stageList
 		return m, nil
 	}
-	m.action = &pendingAction{todo: td, target: m.targets[idx], mode: mode}
-	m.quitting = true
-	return m, tea.Quit
+	target := m.targets[idx]
+	// Perform the drop without quitting: the pane persists, so we return to the
+	// list and run the (potentially slow) drop off the UI thread, reporting back
+	// via dropResultMsg. A drop into a new session focuses the freshly-created
+	// Claude tab, leaving this manager alive in the background to reuse later.
+	m.dropping = true
+	m.stage = stageList
+	m.setStatus("dropping into "+targetDesc(target)+"…", false)
+	return m, m.performDropCmd(pendingAction{todo: td, target: target, mode: mode})
+}
+
+// performDropCmd runs the chosen drop in a goroutine (a tea.Cmd) so herdr's
+// pane creation and claude launch — which can take several seconds — don't
+// freeze the manager. It reports the destination and any error back as a
+// dropResultMsg. The client and context are captured by value; performDrop only
+// makes short-lived, independent socket calls, so this is safe to run alongside
+// the still-rendering UI.
+func (m model) performDropCmd(act pendingAction) tea.Cmd {
+	client, ctx := m.client, m.ctx
+	desc := targetDesc(act.target)
+	return func() tea.Msg {
+		return dropResultMsg{desc: desc, err: performDrop(client, ctx, act)}
+	}
+}
+
+// targetDesc is a short, human label for a drop destination, used in the
+// "dropping…" / "dropped →" status lines.
+func targetDesc(t dropTarget) string {
+	if t.kind == targetNewSession {
+		return "new Claude Code session"
+	}
+	return firstNonEmpty(t.agent, "session")
 }
 
 // --- View ---------------------------------------------------------------------

@@ -219,6 +219,96 @@ func TestRebuildListGroupsOnlyWhenBothScopesHaveTodos(t *testing.T) {
 	})
 }
 
+// TestChooseTargetStaysOpen pins the persistent-pane behavior: choosing a drop
+// target no longer quits the program. Instead it returns to the list, marks a
+// drop in flight, shows a "dropping…" status, and hands back a command that will
+// perform the drop off the UI thread. The pane lives on so more prompts can drop.
+func TestChooseTargetStaysOpen(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	if err := project.add(Todo{ID: "d", Prompt: "drop me"}); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildList()
+
+	// Stand up the target picker the way beginDrop would, but without a socket:
+	// buildTargets degrades to just the new-session target (selected by default).
+	m.dropTodo = todoRef{scope: scopeProject, id: "d"}
+	m.targets, m.targetList = m.buildTargets()
+	m.stage = stageTarget
+
+	next, cmd := m.chooseTarget(dropPaste)
+	m = next.(model)
+	if m.quitting {
+		t.Error("chooseTarget set quitting; the persistent pane must stay open")
+	}
+	if !m.dropping {
+		t.Error("chooseTarget did not mark a drop in flight")
+	}
+	if m.stage != stageList {
+		t.Errorf("stage = %v, want stageList after starting a drop", m.stage)
+	}
+	if m.status == "" || m.statusErr {
+		t.Errorf("expected a non-error 'dropping…' status; got status=%q err=%v", m.status, m.statusErr)
+	}
+	if cmd == nil {
+		t.Fatal("chooseTarget returned no command to perform the drop")
+	}
+
+	// The command performs the drop and reports back. With a nil socket the drop
+	// fails, but the result still flows through Update, which clears the in-flight
+	// flag and surfaces the error — leaving the manager usable.
+	msg := cmd()
+	res, ok := msg.(dropResultMsg)
+	if !ok {
+		t.Fatalf("drop command returned %T, want dropResultMsg", msg)
+	}
+	if res.err == nil {
+		t.Error("expected the socket-less drop to fail")
+	}
+	next, _ = m.Update(res)
+	m = next.(model)
+	if m.dropping {
+		t.Error("dropResultMsg did not clear the in-flight flag")
+	}
+	if !m.statusErr {
+		t.Errorf("expected an error status after a failed drop; got status=%q", m.status)
+	}
+}
+
+// TestBeginDropWhileDroppingIsRejected pins that a second drop can't start while
+// one is still in flight — the guard that keeps two performDrop goroutines from
+// racing on the same manager.
+func TestBeginDropWhileDroppingIsRejected(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	if err := project.add(Todo{ID: "d", Prompt: "drop me"}); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildList()
+	m.dropping = true
+
+	next, _ := m.beginDrop()
+	m = next.(model)
+	if m.stage != stageList {
+		t.Errorf("stage = %v, want to stay on stageList while a drop is in flight", m.stage)
+	}
+	if m.status == "" || m.statusErr {
+		t.Errorf("expected an informational 'in progress' status; got status=%q err=%v", m.status, m.statusErr)
+	}
+}
+
+// TestTargetDesc covers the short destination labels used in the status line.
+func TestTargetDesc(t *testing.T) {
+	if got := targetDesc(dropTarget{kind: targetNewSession}); got != "new Claude Code session" {
+		t.Errorf("new-session desc = %q", got)
+	}
+	if got := targetDesc(dropTarget{kind: targetExistingPane, agent: "claude"}); got != "claude" {
+		t.Errorf("existing-pane desc = %q, want the agent name", got)
+	}
+	if got := targetDesc(dropTarget{kind: targetExistingPane}); got != "session" {
+		t.Errorf("agentless existing-pane desc = %q, want the 'session' fallback", got)
+	}
+}
+
 // TestBeginDropWithoutSocketReportsError pins that dropping with no herdr socket
 // surfaces a status error instead of advancing to the (unusable) target picker.
 func TestBeginDropWithoutSocketReportsError(t *testing.T) {

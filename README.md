@@ -28,6 +28,11 @@ socket API to create panes and type into them.
   - `enter` — _paste, don't run_: types the prompt into Claude Code's input but
     doesn't submit, so you can review/edit and press Enter yourself.
   - `ctrl+r` — _drop & run_: submits it so Claude starts working immediately.
+- **A persistent pane.** The manager stays open after a drop, so you can fire off
+  several prompts in a row. Dropping into a new session focuses that fresh Claude
+  tab and leaves the manager running in the background; invoking the action again
+  returns you to that same pane (per workspace) rather than spawning a duplicate.
+  `esc` (or `ctrl+c`) is the way to close it.
 
 ## Install
 
@@ -74,11 +79,15 @@ menu. Inside the manager:
   - _paste mode_ launches bare `claude`, waits for its input UI to draw, then
     types the prompt without submitting.
 
+The drop runs off the UI thread while the manager pane stays alive, so it can
+take the seconds a new session needs without freezing — and so the pane persists
+for the next drop.
+
 ## Layout
 
 ```
 main.go      subcommand dispatch (todo / todo-ui / version)
-launch.go    the `todo` action (opens the UI pane) + the `todo-ui` runner
+launch.go    the `todo` action (focuses or opens the UI pane) + the `todo-ui` runner
 ui.go        the Bubble Tea manager (list / form / confirm / target stages)
 store.go     project + global JSON-backed todo storage
 drop.go      sending a prompt to an existing pane or a new claude session

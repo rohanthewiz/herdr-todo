@@ -16,16 +16,31 @@ import (
 // from. herdr tears the pane down when the UI exits.
 func launchTodo() {
 	ctx := contextFromPluginEnv()
-	enc, err := ctx.encode()
-	if err != nil {
-		errExit("could not encode launch context:", err)
-	}
 
 	// HERDR_BIN_PATH points at the running herdr binary; it is the portable way
 	// to call back into the CLI from a plugin command.
 	herdr := os.Getenv("HERDR_BIN_PATH")
 	if herdr == "" {
 		herdr = "herdr"
+	}
+
+	// Persistent pane: if a manager pane is already open in this workspace, just
+	// focus it instead of spawning a duplicate. The manager survives drops (it
+	// drops in-loop rather than exiting), so re-invoking the action should return
+	// you to that same pane. A failed focus (the pane vanished between listing and
+	// focusing) falls through to opening a fresh one.
+	if paneID, ok := existingTodoPane(ctx); ok {
+		focus := exec.Command(herdr, "plugin", "pane", "focus", paneID)
+		focus.Stdout = os.Stdout
+		focus.Stderr = os.Stderr
+		if err := focus.Run(); err == nil {
+			return
+		}
+	}
+
+	enc, err := ctx.encode()
+	if err != nil {
+		errExit("could not encode launch context:", err)
 	}
 
 	args := []string{
@@ -45,6 +60,38 @@ func launchTodo() {
 	if err := cmd.Run(); err != nil {
 		errExit("could not open the todo manager:", err)
 	}
+}
+
+// paneTitle is the human label herdr gives the manager pane (the `todo-ui`
+// entry's title in herdr-plugin.toml). herdr reports it on pane.list as both the
+// pane's Title and Label, so we match on it to recognize an already-open manager.
+const paneTitle = "Herdr Todo"
+
+// existingTodoPane finds an already-open manager pane to reuse, returning its id.
+// It matches our manifest pane title and, when the launch context names a
+// workspace, restricts the match to that workspace so each project keeps its own
+// correctly-scoped manager (project todos are scoped to where the pane opened).
+// It returns ("", false) when the herdr socket is unavailable or nothing matches,
+// in which case the caller opens a fresh pane.
+func existingTodoPane(ctx RunContext) (string, bool) {
+	client, err := newHerdrClient()
+	if err != nil {
+		return "", false
+	}
+	panes, err := client.paneList()
+	if err != nil {
+		return "", false
+	}
+	for _, p := range panes {
+		if p.Title != paneTitle && p.Label != paneTitle {
+			continue
+		}
+		if ctx.WorkspaceId != "" && p.WorkspaceID != "" && p.WorkspaceID != ctx.WorkspaceId {
+			continue
+		}
+		return p.PaneID, true
+	}
+	return "", false
 }
 
 // runTodoUI renders the manager TUI inside the zoomed pane herdr opens for the
@@ -79,16 +126,12 @@ func runTodoUI() {
 	// (you can add/edit/organize prompts), so a missing socket is not fatal here.
 	client, _ := newHerdrClient()
 
+	// The manager performs drops itself, in-loop, so the pane persists across
+	// drops (see chooseTarget). Run() only returns when the user quits, at which
+	// point herdr tears the pane down — the deliberate way to close the manager.
 	p := tea.NewProgram(newModel(ctx, project, global, client), tea.WithAltScreen())
-	result, err := p.Run()
-	if err != nil {
+	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "herdr-todo:", err)
 		return
-	}
-
-	if m, ok := result.(model); ok && m.action != nil {
-		if err := performDrop(client, ctx, *m.action); err != nil {
-			fmt.Fprintln(os.Stderr, "herdr-todo: drop failed:", err)
-		}
 	}
 }
