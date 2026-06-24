@@ -96,10 +96,9 @@ func existingTodoPane(ctx RunContext) (string, bool) {
 
 // runTodoUI renders the manager TUI inside the zoomed pane herdr opens for the
 // `todo-ui` entrypoint. It recovers the launch context, loads the project and
-// global backlogs, runs the manager, and — if the user chose to drop a prompt —
-// performs that drop after the program exits (so creating panes / switching
-// workspaces happens once our own pane is torn down). End users never run this
-// directly; herdr does, via the pane.
+// global backlogs, and runs the manager. Drops happen in-loop, off the UI thread
+// (see chooseTarget), so the pane persists across them; Run() only returns when
+// the user quits. End users never run this directly; herdr does, via the pane.
 func runTodoUI() {
 	ctx, err := decodeRunContext(os.Getenv("HERDR_TODO_CTX"))
 	if err != nil {

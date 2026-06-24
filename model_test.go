@@ -1,11 +1,16 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// errTestDrop stands in for a drop failure in tests.
+var errTestDrop = errors.New("drop failed")
 
 // newModelInTemp builds a manager whose project and global backlogs are backed
 // by fresh files under t.TempDir(), so form saves, toggles, and deletes actually
@@ -272,6 +277,116 @@ func TestChooseTargetStaysOpen(t *testing.T) {
 	}
 	if !m.statusErr {
 		t.Errorf("expected an error status after a failed drop; got status=%q", m.status)
+	}
+}
+
+// TestRunDropMarksTodoDone pins the auto-complete behavior: a successful "run"
+// drop carries markDone, and the dropResultMsg handler closes the todo out and
+// notes it in the status. A "paste" drop leaves the todo open.
+func TestRunDropMarksTodoDone(t *testing.T) {
+	t.Run("run drop marks done", func(t *testing.T) {
+		m, project, _ := newModelInTemp(t)
+		if err := project.add(Todo{ID: "r", Prompt: "run me"}); err != nil {
+			t.Fatal(err)
+		}
+		m.rebuildList()
+
+		// A run drop reports success for an existing pane; mark it done.
+		res := dropResultMsg{desc: "claude", ref: todoRef{scope: scopeProject, id: "r"}, markDone: true}
+		next, _ := m.Update(res)
+		m = next.(model)
+
+		if got, _ := project.find("r"); !got.Done {
+			t.Error("a successful run drop did not mark the todo done")
+		}
+		if !strings.Contains(m.status, "marked done") {
+			t.Errorf("status = %q, want it to note 'marked done'", m.status)
+		}
+		// It must persist, not just mutate in memory.
+		reloaded := &store{scope: scopeProject, path: project.path}
+		if err := reloaded.load(); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := reloaded.find("r"); !got.Done {
+			t.Error("the auto-complete did not persist to disk")
+		}
+	})
+
+	t.Run("paste drop leaves it open", func(t *testing.T) {
+		m, project, _ := newModelInTemp(t)
+		if err := project.add(Todo{ID: "p", Prompt: "paste me"}); err != nil {
+			t.Fatal(err)
+		}
+		m.rebuildList()
+
+		res := dropResultMsg{desc: "claude", ref: todoRef{scope: scopeProject, id: "p"}, markDone: false}
+		next, _ := m.Update(res)
+		m = next.(model)
+
+		if got, _ := project.find("p"); got.Done {
+			t.Error("a paste drop marked the todo done; it should stay open")
+		}
+		if strings.Contains(m.status, "marked done") {
+			t.Errorf("status = %q should not claim 'marked done' for a paste drop", m.status)
+		}
+	})
+
+	t.Run("failed run drop leaves it open", func(t *testing.T) {
+		m, project, _ := newModelInTemp(t)
+		if err := project.add(Todo{ID: "f", Prompt: "fail me"}); err != nil {
+			t.Fatal(err)
+		}
+		m.rebuildList()
+
+		res := dropResultMsg{desc: "claude", ref: todoRef{scope: scopeProject, id: "f"}, markDone: true, err: errTestDrop}
+		next, _ := m.Update(res)
+		m = next.(model)
+
+		if got, _ := project.find("f"); got.Done {
+			t.Error("a failed run drop marked the todo done; it should stay open")
+		}
+		if !m.statusErr {
+			t.Errorf("expected an error status after a failed drop; got status=%q", m.status)
+		}
+	})
+}
+
+// TestChooseTargetRunMarksDone pins that a run drop carries markDone with the
+// dropped todo's ref through to the result, while a paste drop does not.
+func TestChooseTargetRunMarksDone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode dropMode
+		want bool
+	}{
+		{"run", dropRun, true},
+		{"paste", dropPaste, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, project, _ := newModelInTemp(t)
+			if err := project.add(Todo{ID: "d", Prompt: "drop me"}); err != nil {
+				t.Fatal(err)
+			}
+			m.rebuildList()
+			m.dropTodo = todoRef{scope: scopeProject, id: "d"}
+			m.targets, m.targetList = m.buildTargets()
+			m.stage = stageTarget
+
+			_, cmd := m.chooseTarget(tc.mode)
+			if cmd == nil {
+				t.Fatal("chooseTarget returned no drop command")
+			}
+			res, ok := cmd().(dropResultMsg)
+			if !ok {
+				t.Fatalf("drop command returned %T, want dropResultMsg", cmd())
+			}
+			if res.markDone != tc.want {
+				t.Errorf("markDone = %v, want %v for a %s drop", res.markDone, tc.want, tc.name)
+			}
+			if res.ref != (todoRef{scope: scopeProject, id: "d"}) {
+				t.Errorf("ref = %+v, want the dropped todo's ref", res.ref)
+			}
+		})
 	}
 }
 

@@ -27,7 +27,12 @@ socket API to create panes and type into them.
 - **You choose submit behavior per drop.**
   - `enter` — _paste, don't run_: types the prompt into Claude Code's input but
     doesn't submit, so you can review/edit and press Enter yourself.
-  - `ctrl+r` — _drop & run_: submits it so Claude starts working immediately.
+  - `ctrl+r` — _drop & run_: submits it so Claude starts working immediately, and
+    auto-marks the todo done (the work is now underway). A _paste_ drop leaves it
+    open, since you haven't committed to it yet.
+- **The drop takes you there.** After a successful drop the destination pane is
+  focused — the freshly-created tab for a new session, or the existing pane you
+  dropped into — while the manager stays alive in the background to reuse later.
 - **A persistent pane.** The manager stays open after a drop, so you can fire off
   several prompts in a row. Dropping into a new session focuses that fresh Claude
   tab and leaves the manager running in the background; invoking the action again
@@ -71,7 +76,8 @@ menu. Inside the manager:
 ## How the "drop" works
 
 - **Existing pane:** the prompt is sent to that pane via herdr's
-  `pane.send_input` (a real Enter key in run mode; no key in paste mode).
+  `pane.send_input` (a real Enter key in run mode; no key in paste mode), then the
+  pane is focused (via `herdr plugin pane focus`) so you land on it.
 - **New session:** a tab is created in the project workspace
   (`tab.create`), then:
   - _run mode_ launches `claude <prompt>` — Claude Code takes a leading prompt

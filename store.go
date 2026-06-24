@@ -166,6 +166,23 @@ func (s *store) toggle(id string) error {
 	return nil
 }
 
+// setDone sets the done flag of the todo with id to done and persists. Unlike
+// toggle it is idempotent (a no-op when already in that state) — used to
+// auto-complete a todo after a "run" drop without risk of reopening one that
+// was already done.
+func (s *store) setDone(id string, done bool) error {
+	for i := range s.todos {
+		if s.todos[i].ID == id {
+			if s.todos[i].Done == done {
+				return nil
+			}
+			s.todos[i].Done = done
+			return s.save()
+		}
+	}
+	return nil
+}
+
 // find returns a copy of the todo with id, and whether it was found.
 func (s *store) find(id string) (Todo, bool) {
 	for _, t := range s.todos {

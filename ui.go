@@ -77,8 +77,10 @@ type pendingAction struct {
 // loop, so the manager can clear its "dropping…" state and show where the prompt
 // landed (or why it failed) while staying open.
 type dropResultMsg struct {
-	desc string // human description of the destination, for the status line
-	err  error
+	desc     string  // human description of the destination, for the status line
+	ref      todoRef // the dropped todo, so a successful run can auto-mark it done
+	markDone bool    // mark ref done on success (a "run" drop starts the work)
+	err      error
 }
 
 // model is the Bubble Tea state for the whole manager: a small stage machine
@@ -145,9 +147,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dropping = false
 		if msg.err != nil {
 			m.setStatus("drop failed: "+msg.err.Error(), true)
-		} else {
-			m.setStatus("dropped → "+msg.desc, false)
+			return m, nil
 		}
+		status := "dropped → " + msg.desc
+		// A "run" drop starts the work, so close the todo out automatically. A
+		// "paste" drop leaves it unsubmitted for the user to review, so it stays
+		// open. setDone is idempotent and best effort — a save failure shouldn't
+		// undo a successful drop, so we just skip the "marked done" note.
+		if msg.markDone {
+			if err := m.storeFor(msg.ref.scope).setDone(msg.ref.id, true); err == nil {
+				status += " · marked done"
+				m.rebuildList()
+			}
+		}
+		m.setStatus(status, false)
 		return m, nil
 	case tea.KeyMsg:
 		switch m.stage {
@@ -616,7 +629,7 @@ func (m model) chooseTarget(mode dropMode) (tea.Model, tea.Cmd) {
 	m.dropping = true
 	m.stage = stageList
 	m.setStatus("dropping into "+targetDesc(target)+"…", false)
-	return m, m.performDropCmd(pendingAction{todo: td, target: target, mode: mode})
+	return m, m.performDropCmd(m.dropTodo, pendingAction{todo: td, target: target, mode: mode})
 }
 
 // performDropCmd runs the chosen drop in a goroutine (a tea.Cmd) so herdr's
@@ -625,11 +638,12 @@ func (m model) chooseTarget(mode dropMode) (tea.Model, tea.Cmd) {
 // dropResultMsg. The client and context are captured by value; performDrop only
 // makes short-lived, independent socket calls, so this is safe to run alongside
 // the still-rendering UI.
-func (m model) performDropCmd(act pendingAction) tea.Cmd {
+func (m model) performDropCmd(ref todoRef, act pendingAction) tea.Cmd {
 	client, ctx := m.client, m.ctx
 	desc := targetDesc(act.target)
+	markDone := act.mode == dropRun
 	return func() tea.Msg {
-		return dropResultMsg{desc: desc, err: performDrop(client, ctx, act)}
+		return dropResultMsg{desc: desc, ref: ref, markDone: markDone, err: performDrop(client, ctx, act)}
 	}
 }
 

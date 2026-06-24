@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"time"
 )
 
@@ -29,14 +31,37 @@ func performDrop(client *herdrClient, ctx RunContext, act pendingAction) error {
 	prompt := act.todo.Prompt
 	switch act.target.kind {
 	case targetExistingPane:
+		var err error
 		if act.mode == dropRun {
-			return client.sendInput(act.target.paneID, prompt, "Enter")
+			err = client.sendInput(act.target.paneID, prompt, "Enter")
+		} else {
+			err = client.sendInput(act.target.paneID, prompt)
 		}
-		return client.sendInput(act.target.paneID, prompt)
+		if err != nil {
+			return err
+		}
+		// Switch to the pane we just dropped into, mirroring how a new-session
+		// drop focuses its freshly-created tab. Best effort: the prompt is
+		// already delivered, so a focus failure must not fail the drop.
+		focusPane(act.target.paneID)
+		return nil
 	case targetNewSession:
 		return dropIntoNewSession(client, ctx, act, prompt)
 	}
 	return errors.New("unknown drop target")
+}
+
+// focusPane brings the pane with paneID to the foreground. There is no socket
+// method to focus an existing pane by id (only directional focus), so we call
+// back through the herdr CLI — the same path launchTodo uses to refocus the
+// manager. HERDR_BIN_PATH points at the running herdr binary inside a plugin
+// command. The error is returned for the caller to ignore as best effort.
+func focusPane(paneID string) error {
+	herdr := os.Getenv("HERDR_BIN_PATH")
+	if herdr == "" {
+		herdr = "herdr"
+	}
+	return exec.Command(herdr, "plugin", "pane", "focus", paneID).Run()
 }
 
 // dropIntoNewSession opens a fresh tab in the project's workspace, launches
