@@ -39,33 +39,72 @@ socket API to create panes and type into them.
   returns you to that same pane (per workspace) rather than spawning a duplicate.
   `esc` (or `ctrl+c`) is the way to close it.
 
-## Install
+## Getting started
 
-### From GitHub
+herdr-todo is a herdr plugin: you install it into a running herdr, then trigger
+it from there. There are two ways to get it in — straight from GitHub, or from a
+local checkout for development. Either way, herdr runs the `[[build]]` step
+(`scripts/build.sh`, a `go build`) at install/link time, so you need **Go 1.26+**
+on the machine running herdr.
+
+### Run it from GitHub
+
+Install directly from this repo — herdr clones it, builds it, and registers the
+plugin:
 
 ```sh
 herdr plugin install rohanthewiz/herdr-todo
 ```
 
-### Local development (this checkout)
+Pin a tag or branch with `--ref`, and skip the confirmation prompt with `--yes`:
 
 ```sh
-herdr plugin link .
+herdr plugin install rohanthewiz/herdr-todo --ref v0.1.0 --yes
 ```
 
-herdr runs the `[[build]]` step (`scripts/build.sh`, a `go build`) and registers
-the `Herdr Todo: Prompts` action. After code changes:
+To update, re-run the install; to remove it:
 
 ```sh
-make relink     # rebuild + unlink + link
+herdr plugin uninstall rohanthewiz.herdr-todo
 ```
 
-Requires Go 1.26+ to build from source.
+### Run it from a local checkout (development)
+
+Clone, then **link** the checkout into the running herdr. `link` runs the build
+step and registers the plugin pointing at your working tree:
+
+```sh
+git clone https://github.com/rohanthewiz/herdr-todo
+cd herdr-todo
+herdr plugin link .          # or: make link
+```
+
+After code changes, rebuild and re-register in one step:
+
+```sh
+make relink                  # build + unlink + link
+```
+
+Remove the link with `herdr plugin unlink rohanthewiz.herdr-todo` (or
+`make unlink`). Handy checks while developing:
+
+```sh
+herdr plugin list                                       # is it installed + enabled?
+herdr plugin log list --plugin rohanthewiz.herdr-todo   # action / pane logs
+```
 
 ## Use
 
-Bind a key to the **`Herdr Todo: Prompts`** action, or run it from herdr's action
-menu. Inside the manager:
+However you installed it, trigger the **`Herdr Todo: Prompts`** action — from
+herdr's action menu, by binding a key to it, or from a shell (or a
+`[[keys.command]]` binding):
+
+```sh
+herdr plugin action invoke rohanthewiz.herdr-todo.todo
+```
+
+That opens the manager as a zoomed pane scoped to the current project; running it
+again focuses the same pane instead of opening a duplicate. Inside the manager:
 
 | Stage  | Keys                                                                                                                              |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------- |
