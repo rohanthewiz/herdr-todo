@@ -224,6 +224,192 @@ func TestRebuildListGroupsOnlyWhenBothScopesHaveTodos(t *testing.T) {
 	})
 }
 
+// TestRebuildListSortsDoneToBottom pins the list order: within a scope, open
+// todos keep their backlog (array) order and done todos sink below them.
+func TestRebuildListSortsDoneToBottom(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	for _, td := range []Todo{
+		{ID: "done-first", Prompt: "d", Done: true},
+		{ID: "open1", Prompt: "o1"},
+		{ID: "open2", Prompt: "o2"},
+	} {
+		if err := project.add(td); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.rebuildList()
+
+	got := make([]string, len(m.rows))
+	for i, r := range m.rows {
+		got[i] = r.id
+	}
+	want := []string{"open1", "open2", "done-first"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rows = %v, want %v (open first, done last)", got, want)
+		}
+	}
+}
+
+// TestHideDoneFoldsCompleted pins ctrl+d's fold: with hideDone set, done todos
+// leave the rows entirely, and clearing it brings them back.
+func TestHideDoneFoldsCompleted(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	if err := project.add(Todo{ID: "open", Prompt: "o"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := project.add(Todo{ID: "done", Prompt: "d", Done: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.hideDone = true
+	m.rebuildList()
+	if len(m.rows) != 1 || m.rows[0].id != "open" {
+		t.Errorf("hidden rows = %+v, want only the open todo", m.rows)
+	}
+	if m.hiddenDoneCount() != 1 {
+		t.Errorf("hiddenDoneCount = %d, want 1", m.hiddenDoneCount())
+	}
+
+	m.hideDone = false
+	m.rebuildList()
+	if len(m.rows) != 2 {
+		t.Errorf("unhidden rows = %+v, want both todos back", m.rows)
+	}
+}
+
+// TestFilterMatchesDeepPromptLines pins the full-body search: a query that only
+// appears past the first line of a multi-line prompt still matches.
+func TestFilterMatchesDeepPromptLines(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	err := project.add(Todo{ID: "deep", Title: "refactor", Prompt: "clean up the store\nand also fix the flaky websocket reconnect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := project.add(Todo{ID: "other", Title: "docs", Prompt: "update the readme"}); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildList()
+
+	m.list.input.SetValue("websocket")
+	m.list.filter()
+	idx := m.list.selectedIndex()
+	if idx < 0 || m.rows[idx].id != "deep" {
+		t.Errorf("filtering for a deep prompt line selected row %d, want the multi-line todo", idx)
+	}
+}
+
+// TestMoveSelectedKeepsHighlight pins reordering: ctrl+down swaps the todo with
+// its neighbor, persists the order, and the highlight follows the moved todo.
+func TestMoveSelectedKeepsHighlight(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	for _, td := range []Todo{{ID: "a", Prompt: "a"}, {ID: "b", Prompt: "b"}} {
+		if err := project.add(td); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.rebuildList() // cursor parks on the first row ("a")
+
+	next, _ := m.moveSelected(1)
+	m = next.(model)
+
+	if project.todos[0].ID != "b" || project.todos[1].ID != "a" {
+		t.Errorf("store order = %+v, want b then a", project.todos)
+	}
+	if ref, ok := m.selectedRef(); !ok || ref.id != "a" {
+		t.Errorf("selected = %+v, want the highlight to follow the moved todo a", ref)
+	}
+}
+
+// TestClearDoneConfirmFlow runs the bulk cleanup: ctrl+w arms the confirm stage
+// with the done count, "y" removes completed todos from both scopes, and open
+// todos survive. With nothing done, it short-circuits to a status message.
+func TestClearDoneConfirmFlow(t *testing.T) {
+	m, project, global := newModelInTemp(t)
+	for _, td := range []Todo{{ID: "p-open", Prompt: "p"}, {ID: "p-done", Prompt: "p", Done: true}} {
+		if err := project.add(td); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := global.add(Todo{ID: "g-done", Prompt: "g", Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildList()
+
+	next, _ := m.beginClearDone()
+	m = next.(model)
+	if m.stage != stageConfirm || m.confirmKind != confirmClearDone {
+		t.Fatalf("beginClearDone stage/kind = %v/%v, want stageConfirm/confirmClearDone", m.stage, m.confirmKind)
+	}
+	if m.pendingClearCount != 2 {
+		t.Errorf("pendingClearCount = %d, want 2", m.pendingClearCount)
+	}
+
+	next, _ = m.updateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(model)
+	if m.stage != stageList {
+		t.Errorf("after confirm stage = %v, want stageList", m.stage)
+	}
+	if _, ok := project.find("p-done"); ok {
+		t.Error("project's done todo survived the clear")
+	}
+	if _, ok := global.find("g-done"); ok {
+		t.Error("global's done todo survived the clear")
+	}
+	if _, ok := project.find("p-open"); !ok {
+		t.Error("the open todo was cleared; only done todos should go")
+	}
+	if !strings.Contains(m.status, "cleared 2") {
+		t.Errorf("status = %q, want it to report clearing 2", m.status)
+	}
+
+	// A second clear finds nothing and never enters the confirm stage.
+	next, _ = m.beginClearDone()
+	m = next.(model)
+	if m.stage != stageList {
+		t.Errorf("empty clear stage = %v, want to stay on stageList", m.stage)
+	}
+	if !strings.Contains(m.status, "no completed") {
+		t.Errorf("status = %q, want the nothing-to-clear note", m.status)
+	}
+}
+
+// TestViewStageFlow covers the read-only prompt view: ctrl+v opens it on the
+// highlighted todo, its rendering carries the full body, esc returns to the
+// list, and enter hands off to the drop flow (which, socket-less here, lands
+// back on the list with an error status).
+func TestViewStageFlow(t *testing.T) {
+	m, project, _ := newModelInTemp(t)
+	body := "first line\nsecond line with the details"
+	if err := project.add(Todo{ID: "v", Title: "view me", Prompt: body}); err != nil {
+		t.Fatal(err)
+	}
+	m.rebuildList()
+
+	next, _ := m.beginView()
+	m = next.(model)
+	if m.stage != stageView {
+		t.Fatalf("beginView stage = %v, want stageView", m.stage)
+	}
+	if got := m.View(); !strings.Contains(got, "second line with the details") {
+		t.Errorf("view rendering lacks the prompt's later lines:\n%s", got)
+	}
+
+	next, _ = m.updateView(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.stage != stageList {
+		t.Errorf("esc from view stage = %v, want stageList", m.stage)
+	}
+
+	next, _ = m.beginView()
+	m = next.(model)
+	next, _ = m.updateView(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if m.stage != stageList || !m.statusErr {
+		t.Errorf("enter (drop) without a socket: stage=%v statusErr=%v, want stageList with an error status", m.stage, m.statusErr)
+	}
+}
+
 // TestChooseTargetStaysOpen pins the persistent-pane behavior: choosing a drop
 // target no longer quits the program. Instead it returns to the list, marks a
 // drop in flight, shows a "dropping…" status, and hands back a command that will

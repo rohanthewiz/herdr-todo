@@ -9,10 +9,10 @@ import (
 
 // claudeReadyProbes are substrings that signal Claude Code's input UI has drawn
 // and is ready to receive a pasted prompt. We poll the new pane for any of them
-// before pasting (paste mode) so keystrokes are not dropped into a half-started
-// app. Matching is best effort — on timeout we paste anyway.
+// before pasting so keystrokes are not dropped into a half-started app.
+// Matching is best effort — on timeout we paste anyway. These track Claude
+// Code's footer/banner strings and may need refreshing as its UI evolves.
 var claudeReadyProbes = []string{
-	"? for shortcuts",
 	"for shortcuts",
 	"Welcome to Claude",
 	"/help for help",
@@ -64,23 +64,22 @@ func focusPane(paneID string) error {
 	return exec.Command(herdr, "plugin", "pane", "focus", paneID).Run()
 }
 
-// dropIntoNewSession opens a fresh tab in the project's workspace, launches
-// Claude Code, and delivers the prompt.
-//
-//   - Run mode launches `claude <prompt>` directly: Claude Code takes a leading
-//     positional prompt and starts working on it immediately — the most reliable
-//     way to "drop and go".
-//   - Paste mode launches a bare `claude`, waits for its input UI to appear, then
-//     types the prompt without submitting so the user can review and edit it.
+// dropIntoNewSession opens a fresh tab in the project's workspace, launches the
+// target's agent (claude by default), waits for its input UI, and delivers the
+// prompt as typed input. Run mode adds a real Enter so the agent starts working;
+// paste mode stops short so the user can review and edit. One delivery path for
+// both modes — and for any agent — with no shell quoting to get wrong and no
+// prompt leaking into shell history or `ps` output.
 func dropIntoNewSession(client *herdrClient, ctx RunContext, act pendingAction, prompt string) error {
 	wsID, err := resolveWorkspaceID(client, ctx)
 	if err != nil {
 		return err
 	}
 
-	label := "claude"
+	command := firstNonEmpty(act.target.command, "claude")
+	label := command
 	if t := firstNonEmpty(act.todo.Title, firstLine(prompt, 18)); t != "" {
-		label = "claude: " + truncate(t, 18)
+		label = command + ": " + truncate(t, 18)
 	}
 
 	_, paneID, err := client.tabCreate(wsID, label, true)
@@ -88,18 +87,26 @@ func dropIntoNewSession(client *herdrClient, ctx RunContext, act pendingAction, 
 		return err
 	}
 
-	if act.mode == dropRun {
-		// `claude <prompt>` — launch and run in one shot.
-		return client.runCommand(paneID, "claude "+shellQuote(prompt))
-	}
-
-	// Paste mode: launch bare claude, wait for it to be ready, then type the
-	// prompt without submitting.
-	if err := client.runCommand(paneID, "claude"); err != nil {
+	if err := client.runCommand(paneID, command); err != nil {
 		return err
 	}
-	client.waitForPaneAnyText(paneID, claudeReadyProbes, 12*time.Second)
+	waitForAgentReady(client, paneID, command)
+	if act.mode == dropRun {
+		return client.sendInput(paneID, prompt, "Enter")
+	}
 	return client.sendInput(paneID, prompt)
+}
+
+// waitForAgentReady blocks until a freshly launched agent looks ready to accept
+// a pasted prompt. Claude Code has known footer/banner strings to probe for;
+// other agents get a short fixed grace period instead. Best effort either way —
+// on timeout we paste anyway.
+func waitForAgentReady(client *herdrClient, paneID, command string) {
+	if command == "claude" {
+		client.waitForPaneAnyText(paneID, claudeReadyProbes, 12*time.Second)
+		return
+	}
+	time.Sleep(2500 * time.Millisecond)
 }
 
 // resolveWorkspaceID finds the workspace to open the new session in: the one the

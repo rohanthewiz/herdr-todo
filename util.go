@@ -25,13 +25,6 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// shellQuote wraps a string in single quotes so the shell treats it as one
-// literal argument, escaping any embedded single quotes the usual POSIX way
-// ('\'' closes the quote, adds an escaped quote, and reopens it).
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
 // newID returns a short random hex id for a todo. It is not cryptographically
 // meaningful — just collision-resistant enough to key a todo across edits.
 func newID() string {

@@ -15,15 +15,29 @@ socket API to create panes and type into them.
 - **Two backlogs.** A per-project backlog lives in `<repo>/.herdr-todo/todos.json`
   (commit it, and it travels with the repo). A global backlog lives in herdr's
   per-plugin config dir and is visible everywhere. The list groups them
-  `Project` / `Global` when both have entries.
-- **Manage prompts.** Add (`ctrl+a`), edit (`ctrl+e`), mark done (`ctrl+t`),
-  delete (`ctrl+x`). Type to fuzzy-filter. Each prompt has an optional title and
-  a multi-line body.
-- **Drop into Claude Code.** Highlight a prompt, press `enter`, and pick a target:
+  `Project` / `Global` when both have entries. Saves are atomic
+  (write-then-rename), and every change re-reads the file first, so two open
+  managers — every pane shares the global backlog — never clobber each other's
+  edits.
+- **Manage prompts.** Add (`ctrl+a`), edit (`ctrl+e`), view the full prompt
+  read-only (`ctrl+v`), mark done (`ctrl+t`), delete (`ctrl+x`). Reorder the
+  backlog with `ctrl+↑`/`ctrl+↓`. Type to fuzzy-filter — the filter searches the
+  entire prompt body, not just the visible preview line. Each prompt has an
+  optional title and a multi-line body.
+- **Done, out of the way.** Completed prompts sink below open ones within each
+  group. Fold them away entirely with `ctrl+d`, and bulk-delete them with
+  `ctrl+w` (confirmed first).
+- **Quick capture from a shell.** `herdr-todo add "fix the flaky retry test"`
+  appends to the project backlog (nearest `.herdr-todo` or `.git` above the
+  current directory) without opening the manager; `-g` targets the global
+  backlog, `-t` sets a title, and a piped stdin works too
+  (`git diff | herdr-todo add -t "review this diff"`).
+- **Drop into an agent.** Highlight a prompt, press `enter`, and pick a target:
   - **A running session** — herdr tags panes with the agent running in them, so
     every Claude Code pane (and other agents) shows up automatically.
   - **A new session** — opens a new tab in the current project's workspace and
-    launches `claude`.
+    launches `claude`. If other agents (say `codex`) are running somewhere, a
+    "new session" entry is offered for each of them as well.
 - **You choose submit behavior per drop.**
   - `enter` — _paste, don't run_: types the prompt into Claude Code's input but
     doesn't submit, so you can review/edit and press Enter yourself.
@@ -106,23 +120,24 @@ herdr plugin action invoke rohanthewiz.herdr-todo.todo
 That opens the manager as a zoomed pane scoped to the current project; running it
 again focuses the same pane instead of opening a duplicate. Inside the manager:
 
-| Stage  | Keys                                                                                                                              |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| List   | `enter` drop · `ctrl+a` add · `ctrl+e` edit · `ctrl+t` toggle done · `ctrl+x` delete · type to filter · `esc` clear filter / quit |
-| Form   | `tab` switch field · `ctrl+s` save · `ctrl+g` toggle Project/Global (when adding) · `esc` cancel                                  |
-| Target | `enter` paste (don't submit) · `ctrl+r` drop & run · `esc` back                                                                   |
+| Stage  | Keys                                                                                                                                                                                                 |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List   | `enter` drop · `ctrl+v` view · `ctrl+a` add · `ctrl+e` edit · `ctrl+t` toggle done · `ctrl+x` delete · `ctrl+↑`/`ctrl+↓` move · `ctrl+d` hide/show done · `ctrl+w` clear done · type to filter · `esc` clear filter / quit |
+| Form   | `tab` switch field · `ctrl+s` save · `ctrl+g` toggle Project/Global (when adding) · `esc` cancel                                                                                                     |
+| View   | `↑`/`↓` scroll · `enter` drop · `ctrl+e` edit · `esc` back                                                                                                                                           |
+| Target | `enter` paste (don't submit) · `ctrl+r` drop & run · `esc` back                                                                                                                                      |
 
 ## How the "drop" works
 
 - **Existing pane:** the prompt is sent to that pane via herdr's
   `pane.send_input` (a real Enter key in run mode; no key in paste mode), then the
   pane is focused (via `herdr plugin pane focus`) so you land on it.
-- **New session:** a tab is created in the project workspace
-  (`tab.create`), then:
-  - _run mode_ launches `claude <prompt>` — Claude Code takes a leading prompt
-    argument and starts working on it immediately;
-  - _paste mode_ launches bare `claude`, waits for its input UI to draw, then
-    types the prompt without submitting.
+- **New session:** a tab is created in the project workspace (`tab.create`), the
+  agent is launched bare (`claude`, or whichever agent the target names), and
+  the manager waits for its input UI to draw. Then the prompt is typed in — run
+  mode adds a real Enter so the agent starts immediately; paste mode stops short
+  so you can review and edit. One delivery path for both modes, with no shell
+  quoting and no prompt leaking into shell history or `ps` output.
 
 The drop runs off the UI thread while the manager pane stays alive, so it can
 take the seconds a new session needs without freezing — and so the pane persists
@@ -131,11 +146,12 @@ for the next drop.
 ## Layout
 
 ```
-main.go      subcommand dispatch (todo / todo-ui / version)
+main.go      subcommand dispatch (todo / todo-ui / add / version)
 launch.go    the `todo` action (focuses or opens the UI pane) + the `todo-ui` runner
-ui.go        the Bubble Tea manager (list / form / confirm / target stages)
-store.go     project + global JSON-backed todo storage
-drop.go      sending a prompt to an existing pane or a new claude session
+cli.go       the `add` subcommand — quick capture without the UI
+ui.go        the Bubble Tea manager (list / form / confirm / target / view stages)
+store.go     project + global JSON-backed todo storage (atomic, reload-before-mutate)
+drop.go      sending a prompt to an existing pane or a new agent session
 herdr.go     herdr unix-socket JSON-RPC client (adapted from herdr-plus)
 context.go   launch-context plumbing (adapted from herdr-plus)
 fuzzylist.go reusable fuzzy list TUI component (adapted from herdr-plus)

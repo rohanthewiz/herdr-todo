@@ -10,7 +10,9 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // uiStage is which screen the manager is currently showing.
@@ -19,8 +21,17 @@ type uiStage int
 const (
 	stageList    uiStage = iota // the project+global todo list
 	stageForm                   // add / edit a prompt
-	stageConfirm                // confirm a delete
+	stageConfirm                // confirm a delete / clear-completed
 	stageTarget                 // pick where to drop the chosen prompt
+	stageView                   // read-only view of a prompt's full body
+)
+
+// confirmKind distinguishes what the confirm stage is about to do.
+type confirmKind int
+
+const (
+	confirmDelete    confirmKind = iota // delete the selected todo
+	confirmClearDone                    // remove every done todo in both scopes
 )
 
 // formMode distinguishes adding a new todo from editing an existing one.
@@ -42,11 +53,12 @@ const (
 
 // dropTarget is one selectable destination in the target picker.
 type dropTarget struct {
-	kind   dropTargetKind
-	paneID string // for targetExistingPane
-	agent  string // detected agent label, for existing panes
-	label  string
-	desc   string
+	kind    dropTargetKind
+	paneID  string // for targetExistingPane
+	agent   string // detected agent label, for existing panes
+	command string // launch command, for targetNewSession ("claude", "codex", …)
+	label   string
+	desc    string
 }
 
 // dropMode is the per-drop submit choice.
@@ -94,8 +106,9 @@ type model struct {
 	stage uiStage
 
 	// List stage.
-	list fuzzyList
-	rows []todoRef // selectable row index -> todo
+	list     fuzzyList
+	rows     []todoRef // selectable row index -> todo
+	hideDone bool      // fold completed todos out of the list
 
 	// Form stage.
 	formMode   formMode
@@ -107,13 +120,19 @@ type model struct {
 	formErr    string
 
 	// Confirm stage.
-	pendingDelete todoRef
-	pendingTitle  string
+	confirmKind       confirmKind
+	pendingDelete     todoRef
+	pendingTitle      string
+	pendingClearCount int
 
 	// Target stage.
 	dropTodo   todoRef
 	targets    []dropTarget
 	targetList fuzzyList
+
+	// View stage.
+	viewRef todoRef
+	viewVP  viewport.Model
 
 	width, height int
 
@@ -172,6 +191,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirm(msg)
 		case stageTarget:
 			return m.updateTarget(msg)
+		case stageView:
+			return m.updateView(msg)
 		}
 	}
 	return m.forward(msg)
@@ -223,6 +244,23 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.beginDelete()
 	case "ctrl+t":
 		return m.toggleSelected()
+	case "ctrl+v":
+		return m.beginView()
+	case "ctrl+d":
+		m.hideDone = !m.hideDone
+		m.rebuildList()
+		if m.hideDone {
+			m.setStatus("hiding completed prompts", false)
+		} else {
+			m.setStatus("showing completed prompts", false)
+		}
+		return m, nil
+	case "ctrl+w":
+		return m.beginClearDone()
+	case "ctrl+up":
+		return m.moveSelected(-1)
+	case "ctrl+down":
+		return m.moveSelected(1)
 	}
 	cmd := m.list.editQuery(msg)
 	return m, cmd
@@ -273,16 +311,27 @@ func (m *model) setStatus(s string, isErr bool) {
 }
 
 // rebuildList regenerates the list rows from the two stores. Project todos come
-// first; the "Project"/"Global" group headings only show when both groups have
-// at least one todo (matching how the rest of herdr-plus groups things).
+// first; within each scope open todos come before done ones (array order is the
+// backlog's priority order), and done todos disappear entirely when hideDone is
+// set. The "Project"/"Global" group headings only show when both groups have at
+// least one visible todo (matching how the rest of herdr-plus groups things).
 func (m *model) rebuildList() {
 	var items []listItem
 	var rows []todoRef
 
-	grouped := len(m.project.todos) > 0 && len(m.global.todos) > 0
+	visible := func(s *store) int {
+		n := 0
+		for _, t := range s.todos {
+			if !t.Done || !m.hideDone {
+				n++
+			}
+		}
+		return n
+	}
+	grouped := visible(m.project) > 0 && visible(m.global) > 0
 
 	add := func(s *store) {
-		for _, t := range s.todos {
+		appendTodo := func(t Todo) {
 			ref := todoRef{scope: s.scope, id: t.ID}
 			badge := "○"
 			if t.Done {
@@ -293,14 +342,31 @@ func (m *model) rebuildList() {
 				name = firstLine(t.Prompt, 60)
 			}
 			items = append(items, listItem{
-				name:       name,
-				desc:       firstLine(t.Prompt, 70),
+				name: name,
+				desc: firstLine(t.Prompt, 70),
+				// Match against the whole prompt (flattened to one line), not
+				// just the rendered first-line preview, so a filter can hit
+				// text buried deep in a multi-line prompt.
+				search:     strings.Join(strings.Fields(t.Title+" "+t.Prompt), " "),
 				badge:      badge,
 				strike:     t.Done,
 				selectable: true,
 				ref:        len(rows),
 			})
 			rows = append(rows, ref)
+		}
+		for _, t := range s.todos {
+			if !t.Done {
+				appendTodo(t)
+			}
+		}
+		if m.hideDone {
+			return
+		}
+		for _, t := range s.todos {
+			if t.Done {
+				appendTodo(t)
+			}
 		}
 	}
 
@@ -318,6 +384,47 @@ func (m *model) rebuildList() {
 	// (setItems re-filters and clamps), so an add/edit/toggle doesn't disturb
 	// what the user has typed or where they were.
 	m.list.setItems(items)
+}
+
+// hiddenDoneCount is how many completed todos the hideDone fold is holding back,
+// for the header note.
+func (m model) hiddenDoneCount() int {
+	n := 0
+	for _, s := range []*store{m.project, m.global} {
+		for _, t := range s.todos {
+			if t.Done {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// moveSelected shifts the highlighted todo one step up or down within its scope
+// and done-state group, then keeps the highlight on it.
+func (m model) moveSelected(delta int) (tea.Model, tea.Cmd) {
+	ref, ok := m.selectedRef()
+	if !ok {
+		return m, nil
+	}
+	if err := m.storeFor(ref.scope).move(ref.id, delta); err != nil {
+		m.setStatus("move failed: "+err.Error(), true)
+		return m, nil
+	}
+	m.rebuildList()
+	m.selectRow(ref)
+	return m, nil
+}
+
+// selectRow parks the list cursor on the row showing ref, so a reorder or
+// rebuild keeps the highlight on the same todo.
+func (m *model) selectRow(ref todoRef) {
+	for i, r := range m.rows {
+		if r == ref {
+			m.list.selectRef(i)
+			return
+		}
+	}
 }
 
 // --- Add / Edit form ----------------------------------------------------------
@@ -345,6 +452,12 @@ func (m model) beginEdit() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	return m.beginEditRef(ref)
+}
+
+// beginEditRef opens the edit form for a specific todo — from the list's
+// highlight or from the view stage.
+func (m model) beginEditRef(ref todoRef) (tea.Model, tea.Cmd) {
 	td, ok := m.resolve(ref)
 	if !ok {
 		return m, nil
@@ -477,8 +590,23 @@ func (m model) beginDelete() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	td, _ := m.resolve(ref)
+	m.confirmKind = confirmDelete
 	m.pendingDelete = ref
 	m.pendingTitle = firstNonEmpty(td.Title, firstLine(td.Prompt, 40))
+	m.stage = stageConfirm
+	return m, nil
+}
+
+// beginClearDone arms the confirm stage to remove every completed todo across
+// both scopes, or reports there is nothing to clear.
+func (m model) beginClearDone() (tea.Model, tea.Cmd) {
+	count := m.hiddenDoneCount()
+	if count == 0 {
+		m.setStatus("no completed prompts to clear", false)
+		return m, nil
+	}
+	m.confirmKind = confirmClearDone
+	m.pendingClearCount = count
 	m.stage = stageConfirm
 	return m, nil
 }
@@ -489,10 +617,14 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case "y", "Y", "enter":
-		if err := m.storeFor(m.pendingDelete.scope).delete(m.pendingDelete.id); err != nil {
-			m.setStatus("delete failed: "+err.Error(), true)
+		if m.confirmKind == confirmClearDone {
+			m.clearDone()
 		} else {
-			m.setStatus("deleted", false)
+			if err := m.storeFor(m.pendingDelete.scope).delete(m.pendingDelete.id); err != nil {
+				m.setStatus("delete failed: "+err.Error(), true)
+			} else {
+				m.setStatus("deleted", false)
+			}
 		}
 		m.rebuildList()
 		m.stage = stageList
@@ -504,6 +636,29 @@ func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// clearDone removes every completed todo from both stores and reports the total
+// in the status line. A failure in one store doesn't stop the other; the first
+// error wins the status.
+func (m *model) clearDone() {
+	removed := 0
+	var firstErr error
+	for _, s := range []*store{m.project, m.global} {
+		n, err := s.clearDone()
+		removed += n
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	switch {
+	case firstErr != nil:
+		m.setStatus("clear failed: "+firstErr.Error(), true)
+	case removed == 1:
+		m.setStatus("cleared 1 completed prompt", false)
+	default:
+		m.setStatus(fmt.Sprintf("cleared %d completed prompts", removed), false)
+	}
+}
+
 // --- Target picker ------------------------------------------------------------
 
 func (m model) beginDrop() (tea.Model, tea.Cmd) {
@@ -511,12 +666,21 @@ func (m model) beginDrop() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	return m.startDrop(ref)
+}
+
+// startDrop opens the target picker for a specific todo — from the list's
+// highlight or from the view stage. Guard failures land back on the list, where
+// the status line is visible.
+func (m model) startDrop(ref todoRef) (tea.Model, tea.Cmd) {
 	if m.dropping {
 		m.setStatus("a drop is still in progress…", false)
+		m.stage = stageList
 		return m, nil
 	}
 	if m.client == nil {
 		m.setStatus("herdr socket unavailable — can't drop into a session", true)
+		m.stage = stageList
 		return m, nil
 	}
 	m.dropTodo = ref
@@ -525,14 +689,17 @@ func (m model) beginDrop() (tea.Model, tea.Cmd) {
 	return m, textinput.Blink
 }
 
-// buildTargets assembles the drop destinations: a new Claude session, plus every
-// agent pane herdr currently reports (Claude panes first), excluding our own.
+// buildTargets assembles the drop destinations: a new Claude session, a new
+// session for every other agent currently running somewhere (if it's running,
+// its command is installed), plus every agent pane herdr reports (Claude panes
+// first), excluding our own.
 func (m model) buildTargets() ([]dropTarget, fuzzyList) {
 	wsLabel := firstNonEmpty(m.ctx.WorkspaceLabel, baseName(m.ctx.WorkDir), "the current project")
 	targets := []dropTarget{{
-		kind:  targetNewSession,
-		label: "＋ New Claude Code session",
-		desc:  "open a new tab in " + wsLabel + " and launch claude",
+		kind:    targetNewSession,
+		command: "claude",
+		label:   "＋ New Claude Code session",
+		desc:    "open a new tab in " + wsLabel + " and launch claude",
 	}}
 
 	if m.client != nil {
@@ -548,6 +715,22 @@ func (m model) buildTargets() ([]dropTarget, fuzzyList) {
 			sort.SliceStable(agents, func(i, j int) bool {
 				return agents[i].Agent == "claude" && agents[j].Agent != "claude"
 			})
+
+			// One "new session" entry per distinct non-claude agent, launched
+			// with the agent label herdr detected as the command.
+			seenAgent := map[string]bool{"claude": true}
+			for _, p := range agents {
+				if seenAgent[p.Agent] {
+					continue
+				}
+				seenAgent[p.Agent] = true
+				targets = append(targets, dropTarget{
+					kind:    targetNewSession,
+					command: p.Agent,
+					label:   "＋ New " + firstNonEmpty(p.DisplayAgent, p.Agent) + " session",
+					desc:    "open a new tab in " + wsLabel + " and launch " + p.Agent,
+				})
+			}
 
 			wsCache := map[string]string{}
 			for _, p := range agents {
@@ -651,9 +834,72 @@ func (m model) performDropCmd(ref todoRef, act pendingAction) tea.Cmd {
 // "dropping…" / "dropped →" status lines.
 func targetDesc(t dropTarget) string {
 	if t.kind == targetNewSession {
+		if t.command != "" && t.command != "claude" {
+			return "new " + t.command + " session"
+		}
 		return "new Claude Code session"
 	}
 	return firstNonEmpty(t.agent, "session")
+}
+
+// --- Prompt view ----------------------------------------------------------------
+
+// beginView opens the read-only view of the highlighted todo's full prompt —
+// the way to read a long prompt without entering the edit form.
+func (m model) beginView() (tea.Model, tea.Cmd) {
+	ref, ok := m.selectedRef()
+	if !ok {
+		return m, nil
+	}
+	td, ok := m.resolve(ref)
+	if !ok {
+		return m, nil
+	}
+	m.viewRef = ref
+	m.viewVP = viewport.New(m.viewWidth(), m.viewHeight())
+	m.viewVP.SetContent(m.viewContent(td))
+	m.stage = stageView
+	return m, nil
+}
+
+func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	case "esc", "q":
+		m.stage = stageList
+		return m, nil
+	case "enter":
+		return m.startDrop(m.viewRef)
+	case "ctrl+e":
+		return m.beginEditRef(m.viewRef)
+	}
+	// Everything else (arrows, pgup/pgdn, mouse wheel) scrolls the body.
+	var cmd tea.Cmd
+	m.viewVP, cmd = m.viewVP.Update(msg)
+	return m, cmd
+}
+
+// viewWidth and viewHeight size the view's scrollable body to the window,
+// leaving room for the heading, meta line, and footer.
+func (m model) viewWidth() int {
+	if w := m.width - 4; w >= 20 {
+		return w
+	}
+	return 76
+}
+
+func (m model) viewHeight() int {
+	if h := m.height - 8; h >= 4 {
+		return h
+	}
+	return 16
+}
+
+// viewContent renders the todo's full prompt wrapped to the view's width.
+func (m model) viewContent(td Todo) string {
+	return lipgloss.NewStyle().Width(m.viewWidth()).Render(td.Prompt)
 }
 
 // --- View ---------------------------------------------------------------------
@@ -669,6 +915,8 @@ func (m model) View() string {
 		return m.viewConfirm()
 	case stageTarget:
 		return m.viewTarget()
+	case stageView:
+		return m.viewPrompt()
 	default:
 		return m.viewList()
 	}
@@ -683,6 +931,11 @@ func (m model) viewList() string {
 	}
 	b.WriteString("  ")
 	b.WriteString(descStyle.Render(scopeNote))
+	if m.hideDone {
+		if hidden := m.hiddenDoneCount(); hidden > 0 {
+			b.WriteString(descStyle.Render(fmt.Sprintf(" · %d done hidden", hidden)))
+		}
+	}
 	b.WriteString("\n\n")
 
 	b.WriteString(m.list.view("No prompts yet — press ctrl+a to add one."))
@@ -698,7 +951,9 @@ func (m model) viewList() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("enter drop · ctrl+a add · ctrl+e edit · ctrl+t done · ctrl+x delete · esc quit"))
+	b.WriteString(footerStyle.Render("enter drop · ctrl+v view · ctrl+a add · ctrl+e edit · ctrl+t done · ctrl+x delete"))
+	b.WriteString("\n")
+	b.WriteString(footerStyle.Render("ctrl+↑/↓ move · ctrl+d hide/show done · ctrl+w clear done · esc quit"))
 	return b.String()
 }
 
@@ -737,11 +992,54 @@ func (m model) viewForm() string {
 
 func (m model) viewConfirm() string {
 	var b strings.Builder
+	if m.confirmKind == confirmClearDone {
+		b.WriteString(titleStyle.Render("Clear completed prompts?"))
+		b.WriteString("\n\n")
+		noun := "prompts"
+		if m.pendingClearCount == 1 {
+			noun = "prompt"
+		}
+		b.WriteString(nameStyle.Render(fmt.Sprintf("  delete %d completed %s across both backlogs", m.pendingClearCount, noun)))
+		b.WriteString("\n\n")
+		b.WriteString(footerStyle.Render("y clear · n / esc cancel"))
+		return b.String()
+	}
 	b.WriteString(titleStyle.Render("Delete prompt?"))
 	b.WriteString("\n\n")
 	b.WriteString(nameStyle.Render("  " + truncate(m.pendingTitle, 70)))
 	b.WriteString("\n\n")
 	b.WriteString(footerStyle.Render("y delete · n / esc cancel"))
+	return b.String()
+}
+
+// viewPrompt renders the read-only prompt view: heading, meta line, the full
+// prompt body in a scrollable viewport, and a footer of actions.
+func (m model) viewPrompt() string {
+	td, ok := m.resolve(m.viewRef)
+	if !ok {
+		// Deleted from another pane while we were viewing it — fall back gently.
+		return descStyle.Render("that prompt no longer exists — esc to go back")
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Prompt"))
+	b.WriteString("  ")
+	b.WriteString(nameSelStyle.Render(truncate(firstNonEmpty(td.Title, firstLine(td.Prompt, 60)), 60)))
+	b.WriteString("\n")
+
+	meta := m.viewRef.scope.String() + " backlog"
+	if !td.Created.IsZero() {
+		meta += " · added " + td.Created.Format("2006-01-02")
+	}
+	if td.Done {
+		meta += " · " + checkStyle.Render("done")
+	}
+	b.WriteString(descStyle.Render(meta))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.viewVP.View())
+	b.WriteString("\n\n")
+	b.WriteString(footerStyle.Render("↑/↓ scroll · enter drop · ctrl+e edit · esc back"))
 	return b.String()
 }
 
@@ -779,6 +1077,12 @@ func (m *model) applySizes() {
 		}
 	case stageTarget:
 		m.targetList.input.Width = w
+	case stageView:
+		m.viewVP.Width = m.viewWidth()
+		m.viewVP.Height = m.viewHeight()
+		if td, ok := m.resolve(m.viewRef); ok {
+			m.viewVP.SetContent(m.viewContent(td))
+		}
 	}
 }
 

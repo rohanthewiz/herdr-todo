@@ -2,10 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+// errTodoNotFound reports a mutation aimed at a todo that no longer exists —
+// typically it was deleted or completed from another manager pane after this
+// pane last loaded. Surfacing it keeps a stale pane honest instead of quietly
+// claiming success.
+var errTodoNotFound = errors.New("todo not found (changed from another pane?)")
 
 // Todo is one saved prompt of future work.
 type Todo struct {
@@ -109,12 +116,16 @@ func (s *store) load() error {
 }
 
 // save writes s.todos back to its file, creating the parent directory as needed.
-// It is a no-op for an unavailable store.
+// It writes to a temp file in the same directory and renames it over the target,
+// so a crash mid-write can never truncate the backlog — the file is always
+// either the old contents or the new, never half of one. It is a no-op for an
+// unavailable store.
 func (s *store) save() error {
 	if s.path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s.todos, "", "  ")
@@ -122,17 +133,52 @@ func (s *store) save() error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(s.path, data, 0o644)
+
+	tmp, err := os.CreateTemp(dir, ".todos-*.tmp")
+	if err != nil {
+		return err
+	}
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Chmod(0o644)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), s.path)
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
+}
+
+// reload refreshes s.todos from disk so a mutation starts from the latest
+// state. Every manager pane shares the global backlog (and long-lived panes can
+// share a project one), so mutating from a stale in-memory copy would silently
+// clobber what another pane wrote. An unavailable store keeps its in-memory
+// list — load would wipe it.
+func (s *store) reload() error {
+	if s.path == "" {
+		return nil
+	}
+	return s.load()
 }
 
 // add appends a new todo and persists.
 func (s *store) add(t Todo) error {
+	if err := s.reload(); err != nil {
+		return err
+	}
 	s.todos = append(s.todos, t)
 	return s.save()
 }
 
 // update replaces the todo with the same ID (title/prompt) and persists.
 func (s *store) update(t Todo) error {
+	if err := s.reload(); err != nil {
+		return err
+	}
 	for i := range s.todos {
 		if s.todos[i].ID == t.ID {
 			s.todos[i].Title = t.Title
@@ -140,30 +186,35 @@ func (s *store) update(t Todo) error {
 			return s.save()
 		}
 	}
-	return nil
+	return errTodoNotFound
 }
 
 // delete removes the todo with id and persists.
 func (s *store) delete(id string) error {
-	out := s.todos[:0]
-	for _, t := range s.todos {
-		if t.ID != id {
-			out = append(out, t)
+	if err := s.reload(); err != nil {
+		return err
+	}
+	for i, t := range s.todos {
+		if t.ID == id {
+			s.todos = append(s.todos[:i], s.todos[i+1:]...)
+			return s.save()
 		}
 	}
-	s.todos = out
-	return s.save()
+	return errTodoNotFound
 }
 
 // toggle flips the done flag of the todo with id and persists.
 func (s *store) toggle(id string) error {
+	if err := s.reload(); err != nil {
+		return err
+	}
 	for i := range s.todos {
 		if s.todos[i].ID == id {
 			s.todos[i].Done = !s.todos[i].Done
 			return s.save()
 		}
 	}
-	return nil
+	return errTodoNotFound
 }
 
 // setDone sets the done flag of the todo with id to done and persists. Unlike
@@ -171,6 +222,9 @@ func (s *store) toggle(id string) error {
 // auto-complete a todo after a "run" drop without risk of reopening one that
 // was already done.
 func (s *store) setDone(id string, done bool) error {
+	if err := s.reload(); err != nil {
+		return err
+	}
 	for i := range s.todos {
 		if s.todos[i].ID == id {
 			if s.todos[i].Done == done {
@@ -180,7 +234,61 @@ func (s *store) setDone(id string, done bool) error {
 			return s.save()
 		}
 	}
+	return errTodoNotFound
+}
+
+// move shifts the todo with id one step toward the front (delta < 0) or back
+// (delta > 0) of the backlog, swapping only with neighbors in the same done
+// state — mirroring the list view, which shows open todos first and done todos
+// last within each scope. Array order is the backlog's priority order, so the
+// swap is persisted. Moving past the edge of the group is a quiet no-op.
+func (s *store) move(id string, delta int) error {
+	if err := s.reload(); err != nil {
+		return err
+	}
+	cur := -1
+	for i := range s.todos {
+		if s.todos[i].ID == id {
+			cur = i
+			break
+		}
+	}
+	if cur < 0 {
+		return errTodoNotFound
+	}
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for j := cur + step; j >= 0 && j < len(s.todos); j += step {
+		if s.todos[j].Done == s.todos[cur].Done {
+			s.todos[cur], s.todos[j] = s.todos[j], s.todos[cur]
+			return s.save()
+		}
+	}
 	return nil
+}
+
+// clearDone removes every done todo and persists, returning how many were
+// removed. Zero removals skip the save.
+func (s *store) clearDone() (int, error) {
+	if err := s.reload(); err != nil {
+		return 0, err
+	}
+	kept := s.todos[:0]
+	removed := 0
+	for _, t := range s.todos {
+		if t.Done {
+			removed++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	s.todos = kept
+	if removed == 0 {
+		return 0, nil
+	}
+	return removed, s.save()
 }
 
 // find returns a copy of the todo with id, and whether it was found.

@@ -133,9 +133,10 @@ func TestStoreCRUD(t *testing.T) {
 		if got.Title != "one-edited" || got.Prompt != "p1-edited" {
 			t.Errorf("after update find(1) = %+v, want edited title/prompt", got)
 		}
-		// Updating an unknown id is a silent no-op, not an error.
-		if err := s.update(Todo{ID: "ghost"}); err != nil {
-			t.Errorf("update of unknown id = %v, want nil", err)
+		// Updating an unknown id reports the todo as gone (it may have been
+		// deleted from another pane), rather than claiming success.
+		if err := s.update(Todo{ID: "ghost"}); err != errTodoNotFound {
+			t.Errorf("update of unknown id = %v, want errTodoNotFound", err)
 		}
 	})
 
@@ -170,6 +171,177 @@ func TestStoreCRUD(t *testing.T) {
 			t.Errorf("after delete, disk has %+v, want only id 2", reloaded.todos)
 		}
 	})
+
+	t.Run("mutations of unknown ids report not found", func(t *testing.T) {
+		if err := s.delete("ghost"); err != errTodoNotFound {
+			t.Errorf("delete of unknown id = %v, want errTodoNotFound", err)
+		}
+		if err := s.toggle("ghost"); err != errTodoNotFound {
+			t.Errorf("toggle of unknown id = %v, want errTodoNotFound", err)
+		}
+		if err := s.setDone("ghost", true); err != errTodoNotFound {
+			t.Errorf("setDone of unknown id = %v, want errTodoNotFound", err)
+		}
+	})
+}
+
+// TestMutationsStartFromDisk pins the lost-update fix: two store instances at
+// the same path (two manager panes sharing the global backlog) each add a todo,
+// and both todos survive — the second write must not clobber the first, because
+// every mutation reloads from disk before applying itself.
+func TestMutationsStartFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.json")
+	s1 := &store{scope: scopeGlobal, path: path}
+	s2 := &store{scope: scopeGlobal, path: path}
+	if err := s1.load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.load(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s1.add(Todo{ID: "from-pane-1", Prompt: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	// s2 still has an empty in-memory list; its add must pick up pane 1's todo.
+	if err := s2.add(Todo{ID: "from-pane-2", Prompt: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := &store{scope: scopeGlobal, path: path}
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.todos) != 2 {
+		t.Fatalf("disk has %d todos, want 2 (a stale pane clobbered the other's write)", len(reloaded.todos))
+	}
+	if _, ok := reloaded.find("from-pane-1"); !ok {
+		t.Error("pane 1's todo was lost")
+	}
+	if _, ok := reloaded.find("from-pane-2"); !ok {
+		t.Error("pane 2's todo was lost")
+	}
+}
+
+// TestSaveLeavesNoTempFiles pins the write-then-rename save: after a save the
+// directory holds exactly the backlog file, with the expected content and no
+// leftover temp files.
+func TestSaveLeavesNoTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	s := &store{scope: scopeProject, path: filepath.Join(dir, "todos.json")}
+	if err := s.add(Todo{ID: "a", Prompt: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "todos.json" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("dir contains %v, want only todos.json", names)
+	}
+}
+
+// TestMove covers reordering: a move swaps only with neighbors in the same done
+// state, persists, and quietly no-ops at the edge of the group.
+func TestMove(t *testing.T) {
+	s := tempStore(t)
+	for _, td := range []Todo{
+		{ID: "a", Prompt: "a"},
+		{ID: "b", Prompt: "b"},
+		{ID: "done1", Prompt: "d", Done: true},
+		{ID: "c", Prompt: "c"},
+	} {
+		if err := s.add(td); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	order := func() []string {
+		ids := make([]string, len(s.todos))
+		for i, td := range s.todos {
+			ids[i] = td.ID
+		}
+		return ids
+	}
+	want := func(expect ...string) {
+		t.Helper()
+		got := order()
+		for i := range expect {
+			if got[i] != expect[i] {
+				t.Fatalf("order = %v, want %v", got, expect)
+			}
+		}
+	}
+
+	// b moves down past the done todo to swap with c — same-done-state neighbors only.
+	if err := s.move("b", 1); err != nil {
+		t.Fatal(err)
+	}
+	want("a", "c", "done1", "b")
+
+	// b moves back up, again skipping the done todo.
+	if err := s.move("b", -1); err != nil {
+		t.Fatal(err)
+	}
+	want("a", "b", "done1", "c")
+
+	// A move past the edge is a no-op, not an error.
+	if err := s.move("a", -1); err != nil {
+		t.Fatal(err)
+	}
+	want("a", "b", "done1", "c")
+
+	if err := s.move("ghost", 1); err != errTodoNotFound {
+		t.Errorf("move of unknown id = %v, want errTodoNotFound", err)
+	}
+
+	// The new order must be on disk, not just in memory.
+	reloaded := &store{scope: s.scope, path: s.path}
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.todos[0].ID != "a" || reloaded.todos[1].ID != "b" {
+		t.Errorf("disk order = %v, want the moved order persisted", reloaded.todos)
+	}
+}
+
+// TestClearDone covers bulk cleanup: only done todos are removed, the count is
+// reported, and clearing an already-clean store is a zero no-op.
+func TestClearDone(t *testing.T) {
+	s := tempStore(t)
+	for _, td := range []Todo{
+		{ID: "open1", Prompt: "p"},
+		{ID: "done1", Prompt: "p", Done: true},
+		{ID: "done2", Prompt: "p", Done: true},
+		{ID: "open2", Prompt: "p"},
+	} {
+		if err := s.add(td); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := s.clearDone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("clearDone removed %d, want 2", n)
+	}
+	if len(s.todos) != 2 || s.todos[0].ID != "open1" || s.todos[1].ID != "open2" {
+		t.Errorf("after clearDone todos = %+v, want the two open ones in order", s.todos)
+	}
+
+	n, err = s.clearDone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("second clearDone removed %d, want 0", n)
+	}
 }
 
 func TestProjectTodosPath(t *testing.T) {

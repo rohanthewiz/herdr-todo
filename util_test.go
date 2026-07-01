@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/hex"
-	"os/exec"
 	"testing"
 )
 
@@ -98,60 +97,5 @@ func TestNewID(t *testing.T) {
 			t.Fatalf("newID() produced a duplicate %q within 100 calls", v)
 		}
 		seen[v] = true
-	}
-}
-
-func TestShellQuote(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain word", "hello", "'hello'"},
-		{"empty string", "", "''"},
-		{"embedded single quote", "it's", `'it'\''s'`},
-		{"spaces preserved", "two words", "'two words'"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shellQuote(tt.in); got != tt.want {
-				t.Errorf("shellQuote(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestShellQuoteRoundTripThroughShell is the strongest check of intent: whatever
-// shellQuote emits, a real shell must hand back to a program as exactly one
-// argument equal to the original string. We feed `printf %s <quoted>` to /bin/sh
-// and require its stdout to match the input byte-for-byte, including the
-// shell-hostile characters (quotes, spaces, newlines, $, backticks, globs) that
-// the single-quote escaping exists to neutralize.
-func TestShellQuoteRoundTripThroughShell(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("no sh on PATH; skipping shell round-trip")
-	}
-	inputs := []string{
-		"hello",
-		"",
-		"it's a trap",
-		"a'b'c",
-		"line one\nline two",
-		"$HOME and `whoami`",
-		"glob * and ? and [abc]",
-		`back\slash`,
-		"quote\"inside",
-	}
-	for _, in := range inputs {
-		t.Run(in, func(t *testing.T) {
-			out, err := exec.Command(sh, "-c", "printf %s "+shellQuote(in)).Output()
-			if err != nil {
-				t.Fatalf("sh failed for %q: %v", in, err)
-			}
-			if string(out) != in {
-				t.Errorf("round-trip of %q through shellQuote = %q, want identical", in, string(out))
-			}
-		})
 	}
 }

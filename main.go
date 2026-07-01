@@ -16,6 +16,8 @@ const version = "0.1.0"
 //     server-side and asks herdr to open the manager UI as a plugin pane.
 //   - "todo-ui" is that UI; herdr runs it inside the pane it opens (the `todo-ui`
 //     entrypoint), so end users never run it directly.
+//   - "add" is quick capture: append a prompt to a backlog straight from a
+//     shell (or a pipe) without opening the manager.
 //
 // The bare binary has no launcher of its own, so it just prints usage.
 func main() {
@@ -27,10 +29,13 @@ func main() {
 		case "todo-ui":
 			runTodoUI()
 			return
+		case "add":
+			addFromCLI(os.Args[2:])
+			return
 		case "version", "--version", "-v", "-V":
 			fmt.Println("herdr-todo", version)
 			return
 		}
 	}
-	errExit("a herdr plugin; run its action through herdr (e.g. `herdr plugin action invoke rohanthewiz.herdr-todo.todo`) or `herdr-todo version`.")
+	errExit("a herdr plugin; run its action through herdr (e.g. `herdr plugin action invoke rohanthewiz.herdr-todo.todo`), or use `herdr-todo add` / `herdr-todo version`.")
 }

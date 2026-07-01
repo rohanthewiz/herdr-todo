@@ -24,6 +24,7 @@ import (
 type listItem struct {
 	name       string
 	desc       string
+	search     string // when set, replaces desc in the fuzzy-match haystack
 	badge      string
 	strike     bool
 	selectable bool
@@ -66,8 +67,10 @@ func (l *fuzzyList) setItems(items []listItem) {
 
 // filter recomputes the visible rows from the current query. An empty query
 // shows every item — separators included — in its natural order. A non-empty
-// query fuzzy-matches only the selectable items against name and description
-// together, highlighting only the matches inside the name.
+// query fuzzy-matches only the selectable items against the name plus the
+// item's search text (its rendered description when no search text is set), so
+// a query can hit text that isn't on screen — like the deep lines of a
+// multi-line prompt. Only matches inside the name are highlighted.
 func (l *fuzzyList) filter() {
 	q := strings.TrimSpace(l.input.Value())
 	l.filtered = l.filtered[:0]
@@ -89,7 +92,7 @@ func (l *fuzzyList) filter() {
 	haystacks := make([]string, len(sel))
 	nameLens := make([]int, len(sel))
 	for i, it := range sel {
-		haystacks[i] = it.name + "  " + it.desc
+		haystacks[i] = it.name + "  " + firstNonEmpty(it.search, it.desc)
 		nameLens[i] = len(it.name)
 	}
 	for _, mt := range fuzzy.Find(q, haystacks) {
@@ -147,6 +150,18 @@ func (l *fuzzyList) moveUp() {
 func (l *fuzzyList) moveDown() {
 	for i := l.cursor + 1; i < len(l.filtered); i++ {
 		if l.filtered[i].item.selectable {
+			l.cursor = i
+			return
+		}
+	}
+}
+
+// selectRef parks the cursor on the visible selectable row carrying ref, so a
+// caller can keep the highlight on an item across a rebuild (e.g. after
+// reordering). A ref that isn't visible leaves the cursor where it was.
+func (l *fuzzyList) selectRef(ref int) {
+	for i, s := range l.filtered {
+		if s.item.selectable && s.item.ref == ref {
 			l.cursor = i
 			return
 		}
